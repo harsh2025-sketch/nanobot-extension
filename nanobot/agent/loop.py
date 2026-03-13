@@ -1,4 +1,4 @@
-"""Agent loop: the core processing engine."""
+﻿"""Agent loop: the core processing engine."""
 
 import asyncio
 from contextlib import AsyncExitStack
@@ -64,7 +64,7 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.memory_window = memory_window
+        self.memory_window = memory_window if memory_window is not None else 50
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -78,8 +78,6 @@ class AgentLoop:
             workspace=workspace,
             bus=bus,
             model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
@@ -95,10 +93,10 @@ class AgentLoop:
         """Register the default set of tools."""
         # File tools (restrict to workspace if configured)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
-        self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
-        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
-        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
-        self.tools.register(ListDirTool(allowed_dir=allowed_dir))
+        self.tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
         
         # Shell tool
         self.tools.register(ExecTool(
@@ -164,11 +162,470 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    @staticmethod
+    def _provider_failed(response_content: str | None, finish_reason: str) -> bool:
+        """Detect provider/API failures that should trigger local fallback."""
+        if finish_reason == "error":
+            return True
+        text = (response_content or "").strip().lower()
+        if text.startswith("error calling llm"):
+            return True
+        if "no endpoints found matching your data policy" in text:
+            return True
+        if "api key" in text and "invalid" in text:
+            return True
+        return False
+
+    @staticmethod
+    def _looks_like_literal_tool_call(text: str | None) -> bool:
+        """Detect accidental raw tool-call strings like read_file("...") from weaker models."""
+        if not text:
+            return False
+        s = text.strip()
+        if not s:
+            return False
+        return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*\s*\([\s\S]*\)\s*$", s))
+
+    @staticmethod
+    def _looks_like_tool_schema_dump(text: str | None) -> bool:
+        """Detect leaked tool/schema payloads rendered as plain text to users."""
+        if not text:
+            return False
+        s = text.strip()
+        low = s.lower()
+        if low.startswith("{function <nil>"):
+            return True
+        if low.startswith("{function "):
+            return True
+        if '"name"' in low and '"parameters"' in low and ('read_file' in low or 'web_search' in low or 'write_file' in low):
+            return True
+        if '"name"' in low and '"parameters"' in low and 'translate_text' in low:
+            return True
+        if "tool call" in low and ("web_search" in low or "read_file" in low):
+            return True
+        if "{\"name\":" in low and "\"parameters\":" in low:
+            return True
+        if re.search(r'\{\s*"name"\s*:\s*"[a-zA-Z0-9_:-]+"\s*,\s*"parameters"\s*:', s, re.DOTALL):
+            return True
+        return False
+
+    @staticmethod
+    def _looks_like_execution_snippet_dump(text: str | None) -> bool:
+        """Detect leaked python/action snippets that should never be a chat reply."""
+        if not text:
+            return False
+        low = text.strip().lower()
+        if "<|python_tag|>" in low:
+            return True
+        if "webbrowser.open(" in low:
+            return True
+        if low.startswith("import ") and "\n" in low:
+            return True
+        return False
+
+    @staticmethod
+    def _extract_last_user_prompt(messages: list[dict]) -> str:
+        for item in reversed(messages):
+            if item.get("role") == "user":
+                return item.get("content", "")
+        return ""
+
+    @staticmethod
+    def _has_placeholder_tool_args(args: Any) -> bool:
+        """Detect placeholder argument values like 'path'/'object' from weak tool-calling outputs."""
+        placeholders = {
+            "path", "object", "string", "number", "boolean", "null",
+            "file", "file_path", "filepath", "<path>", "<file>", "value",
+        }
+
+        def _walk(v: Any) -> bool:
+            if isinstance(v, str):
+                t = v.strip().lower()
+                return t in placeholders
+            if isinstance(v, dict):
+                return any(_walk(x) for x in v.values())
+            if isinstance(v, list):
+                return any(_walk(x) for x in v)
+            return False
+
+        return _walk(args)
+
+    @staticmethod
+    def _quick_direct_response(user_text: str) -> str | None:
+        """Return deterministic responses for common chat intents to avoid unnecessary tool churn."""
+        low = user_text.strip().lower()
+        if low in {"hi", "hello", "hey", "/start", "start"}:
+            return "Hello! I am online and ready. Ask me anything or give me a task."
+        if any(phrase in low for phrase in ("what can you do", "your capabilities", "tell ur capabilities", "tell your capabilities", "what are your capabilities")):
+            return (
+                "I can help with local tasks and coding assistance. Current reliable capabilities are: "
+                "answering questions, summarizing text, basic code generation, file reading and writing, showing exact file paths, opening file contents in chat, simple status/time responses, and limited short translation help for common words or phrases. "
+                "I should not claim broad translation or external-web capabilities unless those tools are actually configured."
+            )
+        if any(phrase in low for phrase in (
+            "how u can claim", "how can you claim", "so how can you claim", "why do you claim", "how can u say that",
+        )) and "translate" in low:
+            return (
+                "That claim was too broad. The correct behavior is: I can only offer limited built-in translation help for some short words or phrases unless a proper translation tool or model is configured. "
+                "I should not advertise full translation capability when it is not reliably available."
+            )
+        if "news" in low:
+            return (
+                "I can help with news, but web search is not configured right now. "
+                "Share a topic and I will provide a concise background summary from built-in knowledge."
+            )
+        if ("today" in low or "todays" in low) and ("news" in low or "highlight" in low or "headline" in low):
+            return (
+                "I can fetch today's highlights. Please specify scope, for example: "
+                "'today highlights in india tech' or 'today world headlines'."
+            )
+        return None
+
+    @staticmethod
+    def _quick_translation_response(user_text: str) -> str | None:
+        text = user_text.strip()
+        low = text.lower()
+        match = re.match(r"translate\s+(.+?)\s+to\s+([a-zA-Z]+)\s*$", low)
+        if not match:
+            return None
+
+        phrase = match.group(1).strip(" \t\n\r\"'")
+        target = match.group(2).strip().lower()
+
+        direct = AgentLoop._known_translation_lookup(phrase, target)
+        if direct:
+            return direct
+
+        if target in {"spanish", "english", "hindi", "french", "german"}:
+            return (
+                f"I can only give limited built-in translation help right now, and I do not have a reliable offline translation result for '{phrase}' to {target}. "
+                "If you want, I can still try a best-effort explanation, but I should not pretend it is exact."
+            )
+
+        return "Translation is not configured for that language pair right now."
+
+    @staticmethod
+    def _known_translation_lookup(phrase: str, target: str) -> str | None:
+        translations: dict[tuple[str, str], str] = {
+            ("harsh", "spanish"): "'harsh' in Spanish depends on context: 'duro', 'severo', or 'áspero'. If 'Harsh' is a person's name, it usually stays 'Harsh'.",
+            ("hello", "spanish"): "'hello' in Spanish is 'hola'.",
+            ("thanks", "spanish"): "'thanks' in Spanish is 'gracias'.",
+            ("thank you", "spanish"): "'thank you' in Spanish is 'gracias'.",
+            ("good morning", "spanish"): "'good morning' in Spanish is 'buenos días'.",
+        }
+        return translations.get((phrase.strip().lower(), target.strip().lower()))
+
+    @staticmethod
+    def _parse_translation_request(user_text: str) -> tuple[str, str | None, str] | None:
+        text = user_text.strip()
+        if not text:
+            return None
+
+        m = re.match(r"translate\s+(.+?)\s+from\s+([a-zA-Z]+)\s+to\s+([a-zA-Z]+)\s*$", text, flags=re.IGNORECASE)
+        if m:
+            phrase = m.group(1).strip(" \t\n\r\"'")
+            source = m.group(2).strip().lower()
+            target = m.group(3).strip().lower()
+            if phrase and target:
+                return phrase, source, target
+
+        m = re.match(r"translate\s+(.+?)\s+to\s+([a-zA-Z]+)\s*$", text, flags=re.IGNORECASE)
+        if m:
+            phrase = m.group(1).strip(" \t\n\r\"'")
+            target = m.group(2).strip().lower()
+            if phrase and target:
+                return phrase, None, target
+        return None
+
+    async def _handle_translation_request(self, user_text: str) -> str | None:
+        req = self._parse_translation_request(user_text)
+        if not req:
+            return None
+
+        phrase, source, target = req
+
+        # Keep short/common cases deterministic and fast.
+        known = self._known_translation_lookup(phrase, target)
+        if known is not None:
+            return known
+
+        source_label = source or "auto-detect"
+        prompt = (
+            f"Translate from {source_label} to {target}. Return only the translated text, no explanation.\n"
+            f"Text: {phrase}"
+        )
+
+        try:
+            response = await self.provider.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a translation engine. Output only translated text.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                tools=[],
+                model=self.model,
+                temperature=0.0,
+                max_tokens=min(self.max_tokens, 200),
+            )
+            content = self._strip_think(response.content)
+        except Exception:
+            content = None
+
+        if (
+            not content
+            or self._looks_like_literal_tool_call(content)
+            or self._looks_like_tool_schema_dump(content)
+            or self._looks_like_execution_snippet_dump(content)
+        ):
+            return (
+                f"I can only give limited built-in translation help right now, and I do not have a reliable translation result for '{phrase}' to {target}. "
+                "If you want, I can still provide a best-effort explanation."
+            )
+
+        return content.strip()
+
+    @staticmethod
+    def _looks_like_internal_context_dump(text: str | None) -> bool:
+        """Detect leaked internal prompt/runtime context text that should never be user-facing."""
+        if not text:
+            return False
+        low = text.lower()
+        leak_markers = [
+            "[runtime context",
+            "your long-term memory is:",
+            "your history log is:",
+            "do not assume gnu tools",
+            "you have a powerful offline local brain",
+        ]
+        return any(marker in low for marker in leak_markers)
+
+    def _resolve_workspace_path(self, path: str | None) -> Path | None:
+        if not path:
+            return None
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.workspace / candidate
+        try:
+            return candidate.resolve()
+        except Exception:
+            return candidate
+
+    @staticmethod
+    def _extract_file_name_hint(text: str) -> str | None:
+        match = re.search(r"([A-Za-z0-9_.-]+\.[A-Za-z0-9]+)", text)
+        return match.group(1).lower() if match else None
+
+    @staticmethod
+    def _extract_path_from_tool_result(result: str) -> str | None:
+        match = re.search(r"\bto\s+([A-Za-z]:\\[^\r\n]+)$", result.strip())
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"\bedited\s+([A-Za-z]:\\[^\r\n]+)$", result.strip())
+        if match:
+            return match.group(1).strip()
+        return None
+
+    def _remember_file_from_tool(
+        self,
+        turn_state: dict[str, str],
+        tool_name: str,
+        tool_args: dict[str, Any],
+        tool_result: str,
+    ) -> None:
+        if tool_name not in {"write_file", "edit_file", "read_file"}:
+            return
+        if isinstance(tool_result, str) and tool_result.startswith("Error"):
+            return
+
+        resolved = self._resolve_workspace_path(tool_args.get("path"))
+        result_path = self._extract_path_from_tool_result(tool_result) if isinstance(tool_result, str) else None
+        remembered = self._resolve_workspace_path(result_path) or resolved
+        if remembered is None:
+            return
+
+        turn_state["last_file_path"] = str(remembered)
+        turn_state["last_file_name"] = remembered.name.lower()
+
+    def _resolve_followup_file_target(
+        self,
+        remembered_path: Path,
+        hinted_name: str | None,
+    ) -> tuple[Path | None, str | None]:
+        if not hinted_name:
+            return remembered_path, None
+        if remembered_path.name.lower() == hinted_name:
+            return remembered_path, None
+
+        sibling = remembered_path.parent / hinted_name
+        if sibling.exists() and sibling.is_file():
+            return sibling.resolve(), None
+
+        matches = list(self.workspace.rglob(hinted_name))[:2]
+        file_matches = [match.resolve() for match in matches if match.is_file()]
+        if len(file_matches) == 1:
+            return file_matches[0], None
+        if len(file_matches) > 1:
+            return None, f"I found multiple files named {hinted_name}. Please specify the path."
+
+        return None, f"I do not have a file named {hinted_name}. The most recent file I handled was {remembered_path}."
+
+    async def _handle_file_followup(self, session: Session, user_text: str) -> str | None:
+        remembered_path = session.metadata.get("last_file_path")
+        if not remembered_path:
+            return None
+
+        path = self._resolve_workspace_path(remembered_path)
+        if path is None:
+            return None
+
+        low = user_text.strip().lower()
+        hinted_name = self._extract_file_name_hint(low)
+        target_path, target_error = self._resolve_followup_file_target(path, hinted_name)
+        if target_error:
+            return target_error
+        if target_path is None:
+            return None
+        path = target_path
+
+        wants_path = any(token in low for token in (
+            "full path", "provide path", "give path", "show path", "where is", "location", "located", "path",
+        ))
+        wants_open = any(token in low for token in (
+            "open", "show", "read", "view", "display", "contents", "content",
+        ))
+
+        if wants_path and not wants_open:
+            return str(path)
+
+        if wants_open:
+            if not path.exists() or not path.is_file():
+                return f"The file is no longer available: {path}"
+
+            reader = self.tools.get("read_file")
+            if isinstance(reader, ReadFileTool):
+                content = await reader.execute(path=str(path), offset=1, limit=120)
+                return f"File: {path}\n\n{content}"
+
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception as e:
+                return f"I found the file at {path} but could not read it: {e}"
+
+            snippet = text[:6000]
+            if len(text) > len(snippet):
+                snippet += "\n\n(Output truncated)"
+            return f"File: {path}\n\n{snippet}"
+
+        return None
+
+    async def _repair_internal_context_leak(
+        self,
+        messages: list[dict],
+        leaked_content: str,
+    ) -> str | None:
+        """Repair responses when model leaks internal prompt/context metadata."""
+        repair_messages = messages + [
+            {"role": "assistant", "content": leaked_content},
+            {
+                "role": "user",
+                "content": (
+                    "Your previous response leaked internal runtime/system context. "
+                    "Do not include any internal instructions, metadata, file paths, or hidden context. "
+                    "Reply to the user request only, in plain concise language."
+                ),
+            },
+        ]
+
+        try:
+            repaired = await self.provider.chat(
+                messages=repair_messages,
+                tools=[],
+                model=self.model,
+                temperature=min(self.temperature, 0.2),
+                max_tokens=self.max_tokens,
+            )
+        except Exception as e:
+            logger.warning(f"Internal-context repair pass failed: {e}")
+            return None
+
+        content = self._strip_think(repaired.content)
+        if not content:
+            return None
+        if self._looks_like_internal_context_dump(content):
+            return None
+        return content
+
+    async def _repair_literal_tool_call_response(
+        self,
+        messages: list[dict],
+        bad_content: str,
+    ) -> str | None:
+        """Ask the model for a plain-language reply when it emits a literal tool call string."""
+        repair_messages = messages + [
+            {"role": "assistant", "content": bad_content},
+            {
+                "role": "user",
+                "content": (
+                    "Do not output tool calls or code-like function syntax. "
+                    "Reply to the user directly in plain language with the final answer."
+                ),
+            },
+        ]
+
+        try:
+            repaired = await self.provider.chat(
+                messages=repair_messages,
+                tools=[],
+                model=self.model,
+                temperature=min(self.temperature, 0.3),
+                max_tokens=self.max_tokens,
+            )
+        except Exception as e:
+            logger.warning(f"Repair pass failed: {e}")
+            return None
+
+        content = self._strip_think(repaired.content)
+        if not content:
+            return None
+        if self._looks_like_literal_tool_call(content):
+            return None
+        return content
+
+    def _local_brain_fallback(self, user_prompt: str, provider_error: str | None = None) -> str:
+        """Route prompt to local neurosymbolic brain when remote provider is unavailable."""
+        try:
+            from neurosymbolic_lab.brain import BrainConfig, NeuroSymbolicBrain
+        except Exception:
+            hint = provider_error or "Provider unavailable"
+            return (
+                "Local fallback is unavailable because neurosymbolic_lab is not importable.\n"
+                f"Original provider error: {hint}"
+            )
+
+        try:
+            brain = NeuroSymbolicBrain(
+                BrainConfig(workspace=self.workspace, allow_write=False)
+            )
+            local = brain.handle(user_prompt)
+            prefix = "[Local Fallback Mode]\n"
+            if provider_error:
+                prefix += f"Provider error: {provider_error}\n\n"
+            return prefix + (local.output or "Local fallback completed with no output.")
+        except Exception as e:
+            hint = provider_error or "Provider unavailable"
+            return (
+                "Provider failed and local fallback also failed.\n"
+                f"Provider error: {hint}\n"
+                f"Fallback error: {e}"
+            )
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str]]:
+    ) -> tuple[str | None, list[str], dict[str, str]]:
         """
         Run the agent iteration loop.
 
@@ -183,6 +640,7 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        turn_state: dict[str, str] = {}
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -195,10 +653,19 @@ class AgentLoop:
                 max_tokens=self.max_tokens,
             )
 
+            if self._provider_failed(response.content, response.finish_reason):
+                logger.warning("Provider failure detected; switching to local neurosymbolic fallback")
+                last_user_prompt = ""
+                for item in reversed(messages):
+                    if item.get("role") == "user":
+                        last_user_prompt = item.get("content", "")
+                        break
+                final_content = self._local_brain_fallback(last_user_prompt, response.content)
+                break
+
             if response.has_tool_calls:
                 if on_progress:
-                    clean = self._strip_think(response.content)
-                    await on_progress(clean or self._tool_hint(response.tool_calls))
+                    await on_progress(self._tool_hint(response.tool_calls))
 
                 tool_call_dicts = [
                     {
@@ -220,15 +687,44 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if self._has_placeholder_tool_args(tool_call.arguments):
+                        result = (
+                            "Error: Invalid tool arguments (placeholder values). "
+                            "Use concrete values or answer directly without tool call."
+                        )
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        self._remember_file_from_tool(turn_state, tool_call.name, tool_call.arguments, result)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
             else:
                 final_content = self._strip_think(response.content)
+                if (
+                    self._looks_like_literal_tool_call(final_content)
+                    or self._looks_like_tool_schema_dump(final_content)
+                    or self._looks_like_execution_snippet_dump(final_content)
+                ):
+                    logger.warning("Model returned literal tool-call text; running plain-language repair pass")
+                    repaired = await self._repair_literal_tool_call_response(messages, final_content)
+                    if repaired:
+                        final_content = repaired
+                    else:
+                        quick = self._quick_direct_response(self._extract_last_user_prompt(messages))
+                        final_content = quick or "I am ready to help. Please tell me the exact result you want."
+                if self._looks_like_internal_context_dump(final_content):
+                    logger.warning("Model leaked internal runtime context; running repair pass")
+                    repaired = await self._repair_internal_context_leak(messages, final_content)
+                    if repaired:
+                        final_content = repaired
+                    else:
+                        final_content = "I am ready to help. Please tell me the specific task you want me to do."
+                if final_content and "Error: File not found: memory/" in final_content:
+                    quick = self._quick_direct_response(self._extract_last_user_prompt(messages))
+                    final_content = quick or "I hit an internal file-state issue. Please retry your request once."
                 break
 
-        return final_content, tools_used
+        return final_content, tools_used, turn_state
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -254,6 +750,12 @@ class AgentLoop:
                         content=f"Sorry, I encountered an error: {str(e)}"
                     ))
             except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Agent loop error: {e}")
+                await asyncio.sleep(1)
                 continue
     
     async def close_mcp(self) -> None:
@@ -296,9 +798,27 @@ class AgentLoop:
         
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+
+        file_followup = await self._handle_file_followup(session, msg.content)
+        if file_followup is not None:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", file_followup)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=file_followup)
+
+        translated = await self._handle_translation_request(msg.content)
+        if translated is not None:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", translated)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=translated)
         
         # Handle slash commands
         cmd = msg.content.strip().lower()
+        quick = self._quick_direct_response(msg.content)
+        if quick is not None:
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=quick)
+
         if cmd == "/new":
             # Capture messages before clearing (avoid race condition with background task)
             messages_to_archive = session.messages.copy()
@@ -331,13 +851,20 @@ class AgentLoop:
         )
 
         async def _bus_progress(content: str) -> None:
+            # Keep progress/tool-hint chatter out of chat channels like Telegram/Web UI.
+            if msg.channel != "cli":
+                return
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=content,
                 metadata=msg.metadata or {},
             ))
 
-        final_content, tools_used = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+        progress_cb = on_progress
+        if progress_cb is None and msg.channel == "cli":
+            progress_cb = _bus_progress
+
+        final_content, tools_used, turn_state = await self._run_agent_loop(
+            initial_messages, on_progress=progress_cb,
         )
 
         if final_content is None:
@@ -347,6 +874,8 @@ class AgentLoop:
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
         
         session.add_message("user", msg.content)
+        if turn_state:
+            session.metadata.update(turn_state)
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)
         self.sessions.save(session)
@@ -386,12 +915,14 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        final_content, _ = await self._run_agent_loop(initial_messages)
+        final_content, _, turn_state = await self._run_agent_loop(initial_messages)
 
         if final_content is None:
             final_content = "Background task completed."
         
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
+        if turn_state:
+            session.metadata.update(turn_state)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
         

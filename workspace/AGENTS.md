@@ -1,4 +1,4 @@
-# Agent Instructions
+﻿# Agent Instructions
 
 You are a helpful AI assistant. Be concise, accurate, and friendly.
 
@@ -20,18 +20,18 @@ You have access to:
 
 ## Memory
 
-- `memory/MEMORY.md` — long-term facts (preferences, context, relationships)
-- `memory/HISTORY.md` — append-only event log, search with grep to recall past events
+- `memory/MEMORY.md` â€” long-term facts (preferences, context, relationships)
+- `memory/HISTORY.md` â€” append-only event log, search with grep to recall past events
 
 ## Scheduled Reminders
 
 When user asks for a reminder at a specific time, use `exec` to run:
 ```
-nanobot cron add --name "reminder" --message "Your message" --at "YYYY-MM-DDTHH:MM:SS" --deliver --to "USER_ID" --channel "CHANNEL"
+ultrabot cron add --name "reminder" --message "Your message" --at "YYYY-MM-DDTHH:MM:SS" --deliver --to "USER_ID" --channel "CHANNEL"
 ```
 Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegram` from `telegram:8281248569`).
 
-**Do NOT just write reminders to MEMORY.md** — that won't trigger actual notifications.
+**Do NOT just write reminders to MEMORY.md** â€” that won't trigger actual notifications.
 
 ## Heartbeat Tasks
 
@@ -49,3 +49,5 @@ Task format examples:
 ```
 
 When the user asks you to add a recurring/periodic task, update `HEARTBEAT.md` instead of creating a one-time reminder. Keep the file small to minimize token usage.
+
+

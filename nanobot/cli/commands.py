@@ -1,10 +1,13 @@
-"""CLI commands for nanobot."""
+﻿"""CLI commands for nanobot."""
 
 import asyncio
+import json
 import os
+import shutil
 import signal
 from pathlib import Path
 import select
+import subprocess
 import sys
 
 import typer
@@ -154,46 +157,284 @@ def main(
 
 
 @app.command()
-def onboard():
-    """Initialize nanobot configuration and workspace."""
+def onboard(
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="Skip setup wizard and create/refresh config only"),
+    config_path: str | None = typer.Option(None, "--config-path", help="Custom config path to use and save"),
+):
+    """Initialize nanobot configuration and run terminal setup wizard."""
     from nanobot.config.loader import get_config_path, load_config, save_config
     from nanobot.config.schema import Config
     from nanobot.utils.helpers import get_workspace_path
-    
-    config_path = get_config_path()
-    
-    if config_path.exists():
-        console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
+
+    resolved_path = _resolve_onboard_config_path(config_path, non_interactive)
+
+    if resolved_path.exists():
+        console.print(f"[yellow]Config already exists at {resolved_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
         console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
         if typer.confirm("Overwrite?"):
             config = Config()
-            save_config(config)
-            console.print(f"[green]✓[/green] Config reset to defaults at {config_path}")
+            save_config(config, config_path=resolved_path)
+            console.print(f"[green]✓[/green] Config reset to defaults at {resolved_path}")
         else:
-            config = load_config()
-            save_config(config)
-            console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
+            config = load_config(resolved_path)
+            save_config(config, config_path=resolved_path)
+            console.print(f"[green]✓[/green] Config refreshed at {resolved_path} (existing values preserved)")
     else:
-        save_config(Config())
-        console.print(f"[green]✓[/green] Created config at {config_path}")
-    
+        config = Config()
+        save_config(config, config_path=resolved_path)
+        console.print(f"[green]✓[/green] Created config at {resolved_path}")
+
+    if not non_interactive:
+        config = load_config(resolved_path)
+        _run_setup_wizard(config)
+        save_config(config, config_path=resolved_path)
+        console.print(f"[green]✓[/green] Setup wizard completed and saved to {resolved_path}")
+
     # Create workspace
     workspace = get_workspace_path()
-    
+
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
         console.print(f"[green]✓[/green] Created workspace at {workspace}")
-    
+
     # Create default bootstrap files
     _create_workspace_templates(workspace)
-    
+
     console.print(f"\n{__logo__} nanobot is ready!")
     console.print("\nNext steps:")
-    console.print("  1. Add your API key to [cyan]~/.nanobot/config.json[/cyan]")
-    console.print("     Get one at: https://openrouter.ai/keys")
-    console.print("  2. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
+    console.print(f"  1. Config path: [cyan]{resolved_path}[/cyan]")
+    if str(resolved_path) != str(get_config_path()):
+        console.print("  2. To keep using this custom path, set env var:")
+        console.print(f"     [cyan]$env:NANOBOT_CONFIG_PATH = \"{resolved_path}\"[/cyan]")
+        console.print("  3. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
+    else:
+        console.print("  2. Provider already configured via wizard (or edit config manually if needed)")
+        console.print("  3. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
+    console.print("\n[dim]Terminal usage works without channels: nanobot agent -m \"Hello!\"[/dim]")
+    console.print("[dim]Enable channels in config.json if you want Telegram/WhatsApp/Discord, etc.[/dim]")
+
+
+@app.command("setup")
+def setup(
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="Skip setup wizard and create/refresh config only"),
+    config_path: str | None = typer.Option(None, "--config-path", help="Custom config path to use and save"),
+):
+    """Alias for onboard (terminal setup wizard)."""
+    onboard(non_interactive=non_interactive, config_path=config_path)
+
+
+@app.command("quickstart")
+def quickstart(
+    model: str = typer.Option("llama3.2:1b", "--model", help="Default model to use"),
+    ollama: bool = typer.Option(True, "--ollama/--no-ollama", help="Configure local Ollama endpoint"),
+    telegram_token: str | None = typer.Option(None, "--telegram-token", help="Telegram bot token to enable Telegram channel"),
+    telegram_allow_from: list[str] = typer.Option([], "--telegram-allow-from", help="Allowed Telegram user IDs/usernames (repeatable)"),
+    wizard: bool = typer.Option(False, "--wizard/--no-wizard", help="Run interactive setup wizard before quickstart"),
+    start: bool = typer.Option(True, "--start/--no-start", help="Start gateway after applying config"),
+    port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    ui: bool = typer.Option(True, "--ui/--no-ui", help="Enable Control UI"),
+):
+    """One-command setup + optional Telegram + start gateway."""
+    from nanobot.config.loader import load_config, save_config, get_config_path
+    from nanobot.utils.helpers import get_workspace_path
+
+    config_path = get_config_path()
+    config = load_config()
+
+    if wizard:
+        _run_setup_wizard(config)
+
+    if ollama:
+        config.providers.custom.api_base = "http://127.0.0.1:11434/v1"
+        config.providers.custom.api_key = "ollama"
+
+    if model:
+        config.agents.defaults.model = model
+
+    if telegram_token:
+        config.channels.telegram.enabled = True
+        config.channels.telegram.token = telegram_token.strip()
+        if telegram_allow_from:
+            config.channels.telegram.allow_from = [x.strip() for x in telegram_allow_from if x.strip()]
+
+    save_config(config, config_path=config_path)
+
+    workspace = get_workspace_path()
+    workspace.mkdir(parents=True, exist_ok=True)
+    _create_workspace_templates(workspace)
+
+    console.print("[green]✓[/green] Quickstart configuration saved")
+    console.print(f"  Config: [cyan]{config_path}[/cyan]")
+    console.print(f"  Model: [cyan]{config.agents.defaults.model}[/cyan]")
+    console.print(f"  Telegram: [cyan]{'enabled' if config.channels.telegram.enabled else 'disabled'}[/cyan]")
+
+    if not start:
+        console.print("[green]✓[/green] Setup complete (gateway not started; use --start to launch)")
+        return
+
+    gateway(port=port, verbose=verbose, ui=ui)
+
+
+def _resolve_onboard_config_path(config_path: str | None, non_interactive: bool) -> Path:
+    """Resolve config path for onboarding, optionally prompting user for custom location."""
+    from nanobot.config.loader import get_config_path
+
+    if config_path:
+        return Path(config_path).expanduser()
+
+    default_path = get_config_path()
+    if non_interactive:
+        return default_path
+
+    if os.getenv("NANOBOT_CONFIG_PATH", "").strip():
+        return default_path
+
+    if typer.confirm("Store config in a custom path?", default=False):
+        proposed = str(Path.cwd() / "config.json")
+        custom = typer.prompt("Config file path", default=proposed).strip()
+        if custom:
+            return Path(custom).expanduser()
+    return default_path
+
+
+def _run_setup_wizard(config: "Config") -> None:
+    """Interactive setup wizard for providers, local LLM, channels, and platforms."""
+    console.print("\n[bold cyan]Terminal Setup Wizard[/bold cyan]")
+    console.print("Configure API/local LLM, channels, and platform commands from terminal.\n")
+
+    use_local = typer.confirm("Prefer local LLM (Ollama) setup?", default=False)
+    configured = False
+
+    if use_local:
+        configured = _setup_ollama_provider(config)
+
+    if not configured:
+        _setup_remote_or_custom_provider(config)
+
+    _setup_channels_wizard(config)
+    _setup_platform_wizard()
+
+
+def _setup_ollama_provider(config: "Config") -> bool:
+    """Configure Ollama (if available) through custom OpenAI-compatible endpoint."""
+    ollama_bin = shutil.which("ollama")
+    if not ollama_bin:
+        console.print("[yellow]Ollama not found in PATH.[/yellow]")
+        console.print("Install from: https://ollama.com/download")
+        return False
+
+    console.print(f"[green]✓[/green] Ollama detected: {ollama_bin}")
+    model = typer.prompt("Ollama model name to use", default="llama3.2:3b").strip()
+
+    if typer.confirm(f"Pull model '{model}' now?", default=True):
+        try:
+            console.print(f"Pulling [cyan]{model}[/cyan]...")
+            subprocess.run([ollama_bin, "pull", model], check=True)
+            console.print(f"[green]✓[/green] Pulled {model}")
+        except Exception as e:
+            console.print(f"[yellow]Could not pull model automatically: {e}[/yellow]")
+
+    config.providers.custom.api_base = "http://127.0.0.1:11434/v1"
+    config.providers.custom.api_key = "ollama"
+    config.agents.defaults.model = model
+    console.print("[green]✓[/green] Configured local Ollama via custom provider")
+    return True
+
+
+def _setup_remote_or_custom_provider(config: "Config") -> None:
+    """Configure cloud provider API or generic OpenAI-compatible endpoint."""
+    from nanobot.providers.registry import PROVIDERS
+
+    specs = [s for s in PROVIDERS if s.name != "vllm"]
+    choices = [s.name.replace("_", "-") for s in specs]
+    console.print("[bold]Supported provider types:[/bold]")
+    console.print("  " + ", ".join(choices))
+    console.print("  any other OpenAI-compatible API endpoint can use: custom")
+
+    default_provider = "openrouter"
+    provider = typer.prompt("Choose provider", default=default_provider).strip().lower().replace("-", "_")
+
+    spec = next((s for s in specs if s.name == provider), None)
+    if spec is None:
+        console.print("[yellow]Unknown provider; using custom provider flow.[/yellow]")
+        provider = "custom"
+
+    model_default = "openrouter/openai/gpt-oss-120b:free" if provider == "openrouter" else "gpt-4o-mini"
+    model = typer.prompt("Default model", default=model_default).strip()
+    config.agents.defaults.model = model
+
+    if provider == "custom":
+        api_base = typer.prompt("Custom API base URL", default="http://127.0.0.1:8000/v1").strip()
+        api_key = typer.prompt("Custom API key (or any placeholder)", default="no-key", hide_input=True)
+        config.providers.custom.api_base = api_base
+        config.providers.custom.api_key = api_key
+        console.print("[green]✓[/green] Custom provider configured")
+        return
+
+    if spec and spec.is_oauth:
+        console.print(f"[yellow]{spec.label} uses OAuth login.[/yellow]")
+        console.print(f"Run: [cyan]nanobot provider login {provider.replace('_', '-')}[/cyan]")
+        return
+
+    api_key = typer.prompt(f"{provider.replace('_', '-')} API key", hide_input=True).strip()
+    provider_cfg = getattr(config.providers, provider)
+    provider_cfg.api_key = api_key
+
+    if spec and (spec.is_gateway or spec.default_api_base):
+        api_base_default = spec.default_api_base or (provider_cfg.api_base or "")
+        if typer.confirm("Set/override API base URL?", default=bool(api_base_default)):
+            provider_cfg.api_base = typer.prompt("API base URL", default=api_base_default).strip()
+
+    console.print(f"[green]✓[/green] Configured provider: {provider.replace('_', '-')}")
+
+
+def _setup_channels_wizard(config: "Config") -> None:
+    """Optional channel setup from terminal prompts."""
+    console.print("\n[bold]Channel setup (optional)[/bold]")
+    if typer.confirm("Enable Telegram channel now?", default=False):
+        token = typer.prompt("Telegram bot token", hide_input=True).strip()
+        config.channels.telegram.enabled = True
+        config.channels.telegram.token = token
+        console.print("[green]✓[/green] Telegram enabled")
+
+    if typer.confirm("Enable Discord channel now?", default=False):
+        token = typer.prompt("Discord bot token", hide_input=True).strip()
+        config.channels.discord.enabled = True
+        config.channels.discord.token = token
+        console.print("[green]✓[/green] Discord enabled")
+
+    if typer.confirm("Enable Slack channel now?", default=False):
+        bot = typer.prompt("Slack bot token (xoxb-...)", hide_input=True).strip()
+        app_token = typer.prompt("Slack app token (xapp-...)", hide_input=True).strip()
+        config.channels.slack.enabled = True
+        config.channels.slack.bot_token = bot
+        config.channels.slack.app_token = app_token
+        console.print("[green]✓[/green] Slack enabled")
+
+
+def _setup_platform_wizard() -> None:
+    """Optional platform command guidance from terminal."""
+    console.print("\n[bold]Platform setup (optional)[/bold]")
+    if not typer.confirm("Configure a platform command now?", default=False):
+        return
+
+    choice = typer.prompt(
+        "Choose platform",
+        default="android",
+    ).strip().lower()
+
+    if choice == "macos":
+        console.print("Run: [cyan]nanobot platform start-macos[/cyan]")
+    elif choice == "ios":
+        device = typer.prompt("iOS device id", default="ios-device-1")
+        console.print(f"Run: [cyan]nanobot platform start-ios --device-id {device}[/cyan]")
+    elif choice == "android":
+        device = typer.prompt("Android device id", default="android-device-1")
+        console.print(f"Run: [cyan]nanobot platform start-android --device-id {device}[/cyan]")
+    else:
+        console.print("Run: [cyan]nanobot platform demo[/cyan]")
 
 
 
@@ -303,7 +544,11 @@ def _make_provider(config: Config):
 
     from nanobot.providers.registry import find_by_name
     spec = find_by_name(provider_name)
-    if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
+    if (
+        not model.startswith("bedrock/")
+        and not (p and p.api_key)
+        and not (spec and (spec.is_oauth or spec.is_local))
+    ):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
@@ -326,6 +571,9 @@ def _make_provider(config: Config):
 def gateway(
     port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    ui: bool = typer.Option(True, "--ui/--no-ui", help="Enable Control UI"),
+    ui_host: str | None = typer.Option(None, "--ui-host", help="Control UI host"),
+    ui_port: int | None = typer.Option(None, "--ui-port", help="Control UI port"),
 ):
     """Start the nanobot gateway."""
     from nanobot.config.loader import load_config, get_data_dir
@@ -389,34 +637,89 @@ def gateway(
         return response
     cron.on_job = on_cron_job
     
-    # Create heartbeat service
-    async def on_heartbeat(prompt: str) -> str:
-        """Execute heartbeat through the agent."""
-        return await agent.process_direct(prompt, session_key="heartbeat")
-    
-    heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        on_heartbeat=on_heartbeat,
-        interval_s=30 * 60,  # 30 minutes
-        enabled=True
-    )
-    
     # Create channel manager
     channels = ChannelManager(config, bus)
+
+    def _pick_heartbeat_target() -> tuple[str, str]:
+        """Pick a routable channel/chat target for heartbeat-triggered messages."""
+        enabled = set(channels.enabled_channels)
+        for item in session_manager.list_sessions():
+            key = item.get("key") or ""
+            if ":" not in key:
+                continue
+            channel, chat_id = key.split(":", 1)
+            if channel in {"cli", "system"}:
+                continue
+            if channel in enabled and chat_id:
+                return channel, chat_id
+        return "cli", "direct"
+
+    # Create heartbeat service
+    async def on_heartbeat_execute(tasks: str) -> str:
+        """Execute heartbeat tasks through the full agent loop."""
+        channel, chat_id = _pick_heartbeat_target()
+
+        async def _silent(*_args, **_kwargs):
+            return None
+
+        return await agent.process_direct(
+            tasks,
+            session_key="heartbeat",
+            channel=channel,
+            chat_id=chat_id,
+            on_progress=_silent,
+        )
+
+    async def on_heartbeat_notify(response: str) -> None:
+        """Deliver heartbeat output to an external channel when available."""
+        from nanobot.bus.events import OutboundMessage
+
+        channel, chat_id = _pick_heartbeat_target()
+        if channel == "cli":
+            return
+        await bus.publish_outbound(
+            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+        )
+
+    hb_cfg = config.gateway.heartbeat
+    heartbeat = HeartbeatService(
+        workspace=config.workspace_path,
+        provider=provider,
+        model=agent.model,
+        on_execute=on_heartbeat_execute,
+        on_notify=on_heartbeat_notify,
+        interval_s=hb_cfg.interval_s,
+        enabled=hb_cfg.enabled,
+    )
     
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
-        console.print("[yellow]Warning: No channels enabled[/yellow]")
+        console.print("[yellow]No channels enabled[/yellow] (this is fine for terminal-only usage)")
+        console.print("[dim]Use: nanobot agent --message \"Hello\" in another terminal[/dim]")
     
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
     
-    console.print(f"[green]✓[/green] Heartbeat: every 30m")
+    console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
     
     async def run():
+        control_ui = None
         try:
+            if ui and config.gateway.control_ui_enabled:
+                from nanobot.web.control_ui import ControlUIServer
+                control_ui = ControlUIServer(
+                    host=ui_host or config.gateway.control_ui_host,
+                    port=ui_port or config.gateway.control_ui_port,
+                    agent=agent,
+                    sessions=session_manager,
+                )
+                await control_ui.start()
+                console.print(
+                    f"[green]✓[/green] Control UI: http://{control_ui.host}:{control_ui.port + 1}"
+                )
+
             await cron.start()
             await heartbeat.start()
             await asyncio.gather(
@@ -427,6 +730,8 @@ def gateway(
             console.print("\nShutting down...")
         finally:
             await agent.close_mcp()
+            if control_ui:
+                await control_ui.stop()
             heartbeat.stop()
             cron.stop()
             agent.stop()
@@ -517,37 +822,75 @@ def agent(
             os._exit(0)
 
         signal.signal(signal.SIGINT, _exit_on_sigint)
-        
-        async def run_interactive():
-            try:
-                while True:
-                    try:
-                        _flush_pending_tty_input()
-                        user_input = await _read_interactive_input_async()
-                        command = user_input.strip()
-                        if not command:
-                            continue
 
-                        if _is_exit_command(command):
-                            _restore_terminal()
-                            console.print("\nGoodbye!")
-                            break
-                        
-                        with _thinking_ctx():
-                            response = await agent_loop.process_direct(user_input, session_id, on_progress=_cli_progress)
-                        _print_agent_response(response, render_markdown=markdown)
-                    except KeyboardInterrupt:
-                        _restore_terminal()
-                        console.print("\nGoodbye!")
-                        break
-                    except EOFError:
-                        _restore_terminal()
-                        console.print("\nGoodbye!")
-                        break
-            finally:
-                await agent_loop.close_mcp()
-        
-        asyncio.run(run_interactive())
+
+# ============================================================================
+# Diagnostics
+# ============================================================================
+
+
+@app.command()
+def doctor(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Run diagnostics and configuration checks."""
+    from nanobot.advanced.systems import DiagnosticsDoctor
+
+    async def run_checks():
+        doctor = DiagnosticsDoctor()
+        result = await doctor.run_diagnostics()
+        return result
+
+    if verbose:
+        console.print("Running nanobot diagnostics...")
+
+    result = asyncio.run(run_checks())
+    console.print(Markdown(f"```json\n{json.dumps(result, indent=2)}\n```"))
+
+
+# ============================================================================
+# ACP Bridge
+# ============================================================================
+
+
+@app.command()
+def acp(
+    session: str = typer.Option("acp:default", "--session", help="Default ACP session key"),
+):
+    """Run ACP bridge over stdio (NDJSON)."""
+    from nanobot.config.loader import load_config, get_data_dir
+    from nanobot.bus.queue import MessageBus
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.cron.service import CronService
+    from nanobot.bridge.acp import ACPBridge, ACPConfig
+    from nanobot.session.manager import SessionManager
+
+    config = load_config()
+    bus = MessageBus()
+    provider = _make_provider(config)
+
+    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
+
+    agent_loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=config.workspace_path,
+        model=config.agents.defaults.model,
+        temperature=config.agents.defaults.temperature,
+        max_tokens=config.agents.defaults.max_tokens,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        memory_window=config.agents.defaults.memory_window,
+        brave_api_key=config.tools.web.search.api_key or None,
+        exec_config=config.tools.exec,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=SessionManager(config.workspace_path),
+        mcp_servers=config.tools.mcp_servers,
+    )
+
+    bridge = ACPBridge(agent_loop, agent_loop.sessions, ACPConfig(default_session=session))
+    asyncio.run(bridge.run())
 
 
 # ============================================================================
@@ -998,6 +1341,20 @@ def _login_github_copilot() -> None:
     except Exception as e:
         console.print(f"[red]Authentication error: {e}[/red]")
         raise typer.Exit(1)
+
+
+# ============================================================================
+# Platform Nodes (Optional)
+# ============================================================================
+# Optional platform support - only added if nanobot.platforms is available
+# This keeps the core codebase unchanged while enabling platform features
+
+try:
+    from nanobot.cli.platform_commands import platform_app
+    app.add_typer(platform_app, name="platform")
+except ImportError:
+    # Platform support not available - continue without it
+    pass
 
 
 if __name__ == "__main__":

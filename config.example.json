@@ -1,0 +1,205 @@
+{
+    "_comment": "Copy this file to ~/.nanobot/config.json and fill in your credentials.",
+    "agents": {
+        "defaults": {
+            "workspace": "~/.nanobot/workspace",
+            "model": "gpt-4o-mini",
+            "maxTokens": 8192,
+            "temperature": 0.7,
+            "maxToolIterations": 20,
+            "memoryWindow": 50,
+            "language": {
+                "_comment": "Multilingual support: 22 Indian languages + ~50 world languages",
+                "autoDetect": true,
+                "respondInUserLanguage": true,
+                "defaultLanguage": "en",
+                "showLanguageHint": true
+            }
+        }
+    },
+    "providers": {
+        "openai": {
+            "apiKey": "",
+            "apiBase": null,
+            "extraHeaders": null
+        },
+        "anthropic": {
+            "apiKey": "",
+            "apiBase": null,
+            "extraHeaders": null
+        },
+        "custom": {
+            "_comment": "Point at any OpenAI-compatible local server (e.g. Ollama, LM Studio)",
+            "apiKey": "ollama",
+            "apiBase": "http://127.0.0.1:11434/v1",
+            "extraHeaders": null
+        },
+        "openrouter": {
+            "apiKey": "",
+            "apiBase": null,
+            "extraHeaders": null
+        },
+        "deepseek": {
+            "apiKey": "",
+            "apiBase": null,
+            "extraHeaders": null
+        },
+        "groq": {
+            "apiKey": "",
+            "apiBase": null,
+            "extraHeaders": null
+        },
+        "gemini": {
+            "apiKey": "",
+            "apiBase": null,
+            "extraHeaders": null
+        }
+    },
+    "channels": {
+        "telegram": {
+            "enabled": false,
+            "token": "",
+            "allowFrom": [],
+            "proxy": null
+        },
+        "discord": {
+            "enabled": false,
+            "token": "",
+            "allowFrom": [],
+            "gatewayUrl": "wss://gateway.discord.gg/?v=10&encoding=json",
+            "intents": 37377
+        },
+        "slack": {
+            "enabled": false,
+            "mode": "socket",
+            "botToken": "",
+            "appToken": "",
+            "replyInThread": true,
+            "groupPolicy": "mention",
+            "allowFrom": []
+        },
+        "whatsapp": {
+            "enabled": false,
+            "bridgeUrl": "ws://localhost:3001",
+            "bridgeToken": "",
+            "allowFrom": []
+        },
+        "matrix": {
+            "enabled": false,
+            "homeserverUrl": "https://matrix.org",
+            "userId": "@youruser:matrix.org",
+            "accessToken": "",
+            "allowFrom": []
+        },
+        "email": {
+            "enabled": false,
+            "imapHost": "",
+            "imapPort": 993,
+            "imapUsername": "",
+            "imapPassword": "",
+            "imapMailbox": "INBOX",
+            "imapUseSsl": true,
+            "smtpHost": "",
+            "smtpPort": 587,
+            "smtpUsername": "",
+            "smtpPassword": "",
+            "smtpUseTls": true,
+            "fromAddress": "",
+            "autoReplyEnabled": true,
+            "pollIntervalSeconds": 30,
+            "allowFrom": []
+        },
+        "googlechat": {
+            "enabled": false,
+            "webhookUrl": "",
+            "listenHost": "127.0.0.1",
+            "listenPort": 8090,
+            "listenPath": "/googlechat",
+            "verifyToken": "",
+            "allowFrom": []
+        },
+        "zalouser": {
+            "enabled": false,
+            "accessToken": "",
+            "listenHost": "127.0.0.1",
+            "listenPort": 8091,
+            "listenPath": "/zalouser",
+            "allowFrom": []
+        },
+        "imessage": {
+            "enabled": false,
+            "inboxPath": "",
+            "pollIntervalSeconds": 5,
+            "sendViaOsascript": true,
+            "allowFrom": []
+        },
+        "signal": {
+            "_comment": "Requires signal-cli daemon: https://github.com/AsamK/signal-cli",
+            "enabled": false,
+            "phoneNumber": "",
+            "apiEndpoint": "http://localhost:25683",
+            "timeout": 30,
+            "retryAttempts": 3,
+            "allowFrom": []
+        },
+        "bluebubbles": {
+            "_comment": "Requires BlueBubbles server running on a Mac: https://bluebubbles.app",
+            "enabled": false,
+            "serverUrl": "http://localhost:1234",
+            "apiKey": "",
+            "macId": "",
+            "timeout": 30,
+            "allowFrom": []
+        },
+        "teams": {
+            "_comment": "Requires an Azure Bot registration. See https://dev.botframework.com",
+            "enabled": false,
+            "appId": "",
+            "appPassword": "",
+            "serviceUrl": "https://smba.trafficmanager.net/amer/",
+            "timeout": 30,
+            "allowFrom": []
+        },
+        "webchat": {
+            "_comment": "Built-in browser chat UI served at http://HOST:PORT/PATH",
+            "enabled": false,
+            "host": "127.0.0.1",
+            "port": 8092,
+            "path": "/chat",
+            "requireAuth": false,
+            "authToken": "",
+            "maxConnections": 1000,
+            "allowFrom": []
+        },
+        "zalooa": {
+            "_comment": "Zalo Official Account channel. Requires Zalo OA Developer account.",
+            "enabled": false,
+            "accessToken": "",
+            "appId": "",
+            "appSecret": "",
+            "officialAccountId": "",
+            "timeout": 30,
+            "allowFrom": []
+        }
+    },
+    "gateway": {
+        "host": "0.0.0.0",
+        "port": 18790,
+        "controlUiEnabled": true,
+        "controlUiHost": "127.0.0.1",
+        "controlUiPort": 18791
+    },
+    "tools": {
+        "web": {
+            "search": {
+                "apiKey": "",
+                "maxResults": 5
+            }
+        },
+        "exec": {
+            "timeout": 60
+        },
+        "restrictToWorkspace": false,
+        "mcpServers": {}
+    }
+}

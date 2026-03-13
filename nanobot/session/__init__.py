@@ -1,4 +1,4 @@
-"""Session management module."""
+﻿"""Session management module."""
 
 from nanobot.session.manager import SessionManager, Session
 

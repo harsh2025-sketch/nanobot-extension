@@ -1,4 +1,4 @@
-"""Email channel implementation using IMAP polling + SMTP replies."""
+﻿"""Email channel implementation using IMAP polling + SMTP replies."""
 
 import asyncio
 import html
@@ -35,6 +35,7 @@ class EmailChannel(BaseChannel):
     """
 
     name = "email"
+    display_name = "Email"
     _IMAP_MONTHS = (
         "Jan",
         "Feb",
@@ -94,7 +95,7 @@ class EmailChannel(BaseChannel):
                         metadata=item.get("metadata", {}),
                     )
             except Exception as e:
-                logger.error(f"Email polling error: {e}")
+                logger.error("Email polling error: {}", e)
 
             await asyncio.sleep(poll_seconds)
 
@@ -108,11 +109,6 @@ class EmailChannel(BaseChannel):
             logger.warning("Skip email send: consent_granted is false")
             return
 
-        force_send = bool((msg.metadata or {}).get("force_send"))
-        if not self.config.auto_reply_enabled and not force_send:
-            logger.info("Skip automatic email reply: auto_reply_enabled is false")
-            return
-
         if not self.config.smtp_host:
             logger.warning("Email channel SMTP host not configured")
             return
@@ -122,7 +118,13 @@ class EmailChannel(BaseChannel):
             logger.warning("Email channel missing recipient address")
             return
 
-        base_subject = self._last_subject_by_chat.get(to_addr, "nanobot reply")
+        force_send = bool((msg.metadata or {}).get("force_send"))
+
+        if not self.config.auto_reply_enabled and not force_send:
+            logger.info("Skip email send to {}: auto_reply_enabled is false", to_addr)
+            return
+
+        base_subject = self._last_subject_by_chat.get(to_addr, "UltraBot reply")
         subject = self._reply_subject(base_subject)
         if msg.metadata and isinstance(msg.metadata.get("subject"), str):
             override = msg.metadata["subject"].strip()
@@ -143,7 +145,7 @@ class EmailChannel(BaseChannel):
         try:
             await asyncio.to_thread(self._smtp_send, email_msg)
         except Exception as e:
-            logger.error(f"Error sending email to {to_addr}: {e}")
+            logger.error("Error sending email to {}: {}", to_addr, e)
             raise
 
     def _validate_config(self) -> bool:
@@ -162,7 +164,7 @@ class EmailChannel(BaseChannel):
             missing.append("smtp_password")
 
         if missing:
-            logger.error(f"Email channel not configured, missing: {', '.join(missing)}")
+            logger.error("Email channel not configured, missing: {}", ', '.join(missing))
             return False
         return True
 
@@ -304,7 +306,8 @@ class EmailChannel(BaseChannel):
                     self._processed_uids.add(uid)
                     # mark_seen is the primary dedup; this set is a safety net
                     if len(self._processed_uids) > self._MAX_PROCESSED_UIDS:
-                        self._processed_uids.clear()
+                        # Evict a random half to cap memory; mark_seen is the primary dedup
+                        self._processed_uids = set(list(self._processed_uids)[len(self._processed_uids) // 2:])
 
                 if mark_seen:
                     client.store(imap_id, "+FLAGS", "\\Seen")
@@ -396,7 +399,7 @@ class EmailChannel(BaseChannel):
         return html.unescape(text)
 
     def _reply_subject(self, base_subject: str) -> str:
-        subject = (base_subject or "").strip() or "nanobot reply"
+        subject = (base_subject or "").strip() or "UltraBot reply"
         prefix = self.config.subject_prefix or "Re: "
         if subject.lower().startswith("re:"):
             return subject

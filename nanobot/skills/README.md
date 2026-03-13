@@ -1,6 +1,6 @@
-# nanobot Skills
+﻿# ultrabot Skills
 
-This directory contains built-in skills that extend nanobot's capabilities.
+This directory contains built-in skills that extend ultrabot's capabilities.
 
 ## Skill Format
 
@@ -23,3 +23,7 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `tmux` | Remote-control tmux sessions |
 | `clawhub` | Search and install skills from ClawHub registry |
 | `skill-creator` | Create new skills |
+| `telegram-ops` | Telegram channel setup, validation, and safety checklist |
+| `latency-tuning` | Fast-response patterns for local-first chat workflows |
+| `local-brain` | Guidance for neurosymbolic fallback and offline tasking |
+

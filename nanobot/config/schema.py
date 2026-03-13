@@ -1,7 +1,9 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -27,7 +29,11 @@ class TelegramConfig(Base):
     enabled: bool = False
     token: str = ""  # Bot token from @BotFather
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs or usernames
-    proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+    proxy: str | None = (
+        None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+    )
+    reply_to_message: bool = False  # If true, bot replies quote the original message
+    group_policy: Literal["open", "mention"] = "mention"  # "mention" responds when @mentioned or replied to, "open" responds to all
 
 
 class FeishuConfig(Base):
@@ -39,6 +45,7 @@ class FeishuConfig(Base):
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
     verification_token: str = ""  # Verification Token for event subscription (optional)
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
+    react_emoji: str = "THUMBSUP"
 
 
 class DingTalkConfig(Base):
@@ -58,6 +65,28 @@ class DiscordConfig(Base):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
     intents: int = 37377  # GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
+    group_policy: Literal["mention", "open"] = "mention"
+
+
+class MatrixConfig(Base):
+    """Matrix (Element) channel configuration."""
+
+    enabled: bool = False
+    homeserver: str = "https://matrix.org"
+    access_token: str = ""
+    user_id: str = ""  # @bot:matrix.org
+    device_id: str = ""
+    e2ee_enabled: bool = True  # Enable Matrix E2EE support (encryption + encrypted room handling).
+    sync_stop_grace_seconds: int = (
+        2  # Max seconds to wait for sync_forever to stop gracefully before cancellation fallback.
+    )
+    max_media_bytes: int = (
+        20 * 1024 * 1024
+    )  # Max attachment size accepted for Matrix media handling (inbound + outbound).
+    allow_from: list[str] = Field(default_factory=list)
+    group_policy: Literal["open", "mention", "allowlist"] = "open"
+    group_allow_from: list[str] = Field(default_factory=list)
+    allow_room_mentions: bool = False
 
 
 class EmailConfig(Base):
@@ -84,7 +113,9 @@ class EmailConfig(Base):
     from_address: str = ""
 
     # Behavior
-    auto_reply_enabled: bool = True  # If false, inbound email is read but no automatic reply is sent
+    auto_reply_enabled: bool = (
+        True  # If false, inbound email is read but no automatic reply is sent
+    )
     poll_interval_seconds: int = 30
     mark_seen: bool = True
     max_body_chars: int = 12000
@@ -150,6 +181,7 @@ class SlackConfig(Base):
     user_token_read_only: bool = True
     reply_in_thread: bool = True
     react_emoji: str = "eyes"
+    allow_from: list[str] = Field(default_factory=list)  # Allowed Slack user IDs (sender-level)
     group_policy: str = "mention"  # "mention", "open", "allowlist"
     group_allow_from: list[str] = Field(default_factory=list)  # Allowed channel IDs if allowlist
     dm: SlackDMConfig = Field(default_factory=SlackDMConfig)
@@ -164,9 +196,116 @@ class QQConfig(Base):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
 
 
+class WecomConfig(Base):
+    """WeCom (Enterprise WeChat) AI Bot channel configuration."""
+
+    enabled: bool = False
+    bot_id: str = ""  # Bot ID from WeCom AI Bot platform
+    secret: str = ""  # Bot Secret from WeCom AI Bot platform
+    allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs
+    welcome_message: str = ""  # Welcome message for enter_chat event
+
+
+
+class GoogleChatConfig(Base):
+    """Google Chat channel configuration."""
+
+    enabled: bool = False
+    webhook_url: str = ""  # Incoming webhook URL for outbound messages
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 8090
+    listen_path: str = "/googlechat"
+    verify_token: str = ""  # Optional token for inbound verification
+    allow_from: list[str] = Field(default_factory=list)
+
+
+class ZaloUserConfig(Base):
+    """Zalo Personal (Zalo User) channel configuration."""
+
+    enabled: bool = False
+    access_token: str = ""  # Zalo user access token
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 8091
+    listen_path: str = "/zalouser"
+    verify_token: str = ""  # Optional token for inbound verification
+    allow_from: list[str] = Field(default_factory=list)
+
+
+class IMessageConfig(Base):
+    """Legacy iMessage channel configuration."""
+
+    enabled: bool = False
+    inbox_path: str = ""  # Optional JSONL inbox file for inbound simulation
+    poll_interval_seconds: int = 5
+    send_via_osascript: bool = True
+    allow_from: list[str] = Field(default_factory=list)
+
+
+class SignalConfig(Base):
+    """Signal channel configuration (requires signal-cli or signald daemon)."""
+
+    enabled: bool = False
+    phone_number: str = ""  # Registered phone number (e.g. "+15551234567")
+    api_endpoint: str = "http://localhost:25683"  # signald/signal-cli REST API
+    timeout: int = 30
+    retry_attempts: int = 3
+    max_message_length: int = 4096
+    allow_from: list[str] = Field(default_factory=list)  # Allowed phone numbers
+
+
+class BlueBubblesConfig(Base):
+    """BlueBubbles iMessage channel configuration (macOS server required)."""
+
+    enabled: bool = False
+    server_url: str = "http://localhost:1234"  # BlueBubbles server URL
+    api_key: str = ""
+    mac_id: str = ""  # Unique identifier for the Mac running BlueBubbles
+    timeout: int = 30
+    allow_from: list[str] = Field(default_factory=list)  # Allowed phone/email handles
+
+
+class TeamsConfig(Base):
+    """Microsoft Teams channel configuration."""
+
+    enabled: bool = False
+    app_id: str = ""  # Azure AD App ID
+    app_password: str = ""  # Azure AD App Password / Client Secret
+    service_url: str = "https://smba.trafficmanager.net/amer/"
+    timeout: int = 30
+    allow_from: list[str] = Field(default_factory=list)  # Allowed Teams user IDs
+
+
+class WebChatConfig(Base):
+    """Built-in WebChat channel — serves a browser-accessible chat UI."""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8090
+    path: str = "/chat"
+    cors_origins: list[str] = Field(default_factory=lambda: ["*"])
+    require_auth: bool = False
+    auth_token: str = ""  # Bearer token required when require_auth=True
+    max_connections: int = 1000
+    allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs (empty = all)
+
+
+class ZaloOAConfig(Base):
+    """Zalo Official Account channel configuration."""
+
+    enabled: bool = False
+    access_token: str = ""  # OA access token
+    app_id: str = ""
+    app_secret: str = ""
+    official_account_id: str = ""
+    timeout: int = 30
+    allow_from: list[str] = Field(default_factory=list)  # Allowed Zalo user IDs
+
+
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
+    send_progress: bool = True  # stream agent's text progress to the channel
+    send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
@@ -176,6 +315,36 @@ class ChannelsConfig(Base):
     email: EmailConfig = Field(default_factory=EmailConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
     qq: QQConfig = Field(default_factory=QQConfig)
+    matrix: MatrixConfig = Field(default_factory=MatrixConfig)
+    wecom: WecomConfig = Field(default_factory=WecomConfig)
+    googlechat: GoogleChatConfig = Field(default_factory=GoogleChatConfig)
+    zalouser: ZaloUserConfig = Field(default_factory=ZaloUserConfig)
+    zalooa: ZaloOAConfig = Field(default_factory=ZaloOAConfig)
+    imessage: IMessageConfig = Field(default_factory=IMessageConfig)
+    bluebubbles: BlueBubblesConfig = Field(default_factory=BlueBubblesConfig)
+    signal: SignalConfig = Field(default_factory=SignalConfig)
+    teams: TeamsConfig = Field(default_factory=TeamsConfig)
+    webchat: WebChatConfig = Field(default_factory=WebChatConfig)
+
+
+class LanguageConfig(Base):
+    """Multilingual response configuration.
+
+    nanobot supports automatic language detection and response mirroring for
+    22 official Indian languages plus ~50 world languages.
+    """
+
+    auto_detect: bool = True
+    """Auto-detect the language of each incoming message and reply in that language."""
+
+    respond_in_user_language: bool = True
+    """Mirror the user's detected language. Set False to always use default_language."""
+
+    default_language: str = "en"
+    """ISO 639-1/3 code for the fallback / fixed language (e.g. 'hi', 'ta', 'en')."""
+
+    show_language_hint: bool = True
+    """Inject the detected language name into the runtime context (helps the LLM)."""
 
 
 class AgentDefaults(Base):
@@ -183,10 +352,24 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
+    provider: str = (
+        "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
+    )
     max_tokens: int = 8192
-    temperature: float = 0.7
-    max_tool_iterations: int = 20
-    memory_window: int = 50
+    context_window_tokens: int = 65_536
+    provider_timeout_seconds: int = 2
+    temperature: float = 0.1
+    max_tool_iterations: int = 40
+    # Deprecated compatibility field: accepted from old configs but ignored at runtime.
+    memory_window: int | None = Field(default=None, exclude=True)
+    reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
+    language: LanguageConfig = Field(default_factory=LanguageConfig)
+    """Multilingual detection and response mirroring settings."""
+
+    @property
+    def should_warn_deprecated_memory_window(self) -> bool:
+        """Return True when old memoryWindow is present without contextWindowTokens."""
+        return self.memory_window is not None and "context_window_tokens" not in self.model_fields_set
 
 
 class AgentsConfig(Base):
@@ -207,6 +390,7 @@ class ProvidersConfig(Base):
     """Configuration for LLM providers."""
 
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
+    azure_openai: ProviderConfig = Field(default_factory=ProviderConfig)  # Azure OpenAI (model = deployment name)
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -219,9 +403,18 @@ class ProvidersConfig(Base):
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
-    siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动) API gateway
+    ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama local models
+    siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动)
+    volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎)
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
+
+
+class HeartbeatConfig(Base):
+    """Heartbeat service configuration."""
+
+    enabled: bool = True
+    interval_s: int = 30 * 60  # 30 minutes
 
 
 class GatewayConfig(Base):
@@ -229,6 +422,10 @@ class GatewayConfig(Base):
 
     host: str = "0.0.0.0"
     port: int = 18790
+    control_ui_enabled: bool = True
+    control_ui_host: str = "127.0.0.1"
+    control_ui_port: int = 18791
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
 class WebSearchConfig(Base):
@@ -241,6 +438,9 @@ class WebSearchConfig(Base):
 class WebToolsConfig(Base):
     """Web tools configuration."""
 
+    proxy: str | None = (
+        None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+    )
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
@@ -248,15 +448,19 @@ class ExecToolConfig(Base):
     """Shell exec tool configuration."""
 
     timeout: int = 60
+    path_append: str = ""
 
 
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
+    type: Literal["stdio", "sse", "streamableHttp"] | None = None  # auto-detected if omitted
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
-    url: str = ""  # HTTP: streamable HTTP endpoint URL
+    url: str = ""  # HTTP/SSE: endpoint URL
+    headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
+    tool_timeout: int = 30  # seconds before a tool call is cancelled
 
 
 class ToolsConfig(Base):
@@ -282,18 +486,48 @@ class Config(BaseSettings):
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
+    def _match_provider(
+        self, model: str | None = None
+    ) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""
         from nanobot.providers.registry import PROVIDERS
 
+        forced = self.agents.defaults.provider
+        if forced != "auto":
+            p = getattr(self.providers, forced, None)
+            return (p, forced) if p else (None, None)
+
         model_lower = (model or self.agents.defaults.model).lower()
+        model_normalized = model_lower.replace("-", "_")
+        model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
+        normalized_prefix = model_prefix.replace("-", "_")
+
+        def _kw_matches(kw: str) -> bool:
+            kw = kw.lower()
+            return kw in model_lower or kw.replace("-", "_") in model_normalized
+
+        # Explicit provider prefix wins — prevents `github-copilot/...codex` matching openai_codex.
+        for spec in PROVIDERS:
+            p = getattr(self.providers, spec.name, None)
+            if p and model_prefix and normalized_prefix == spec.name:
+                if spec.is_oauth or spec.is_local or p.api_key:
+                    return p, spec.name
 
         # Match by keyword (order follows PROVIDERS registry)
         for spec in PROVIDERS:
             p = getattr(self.providers, spec.name, None)
-            if p and any(kw in model_lower for kw in spec.keywords):
-                if spec.is_oauth or p.api_key:
+            if p and any(_kw_matches(kw) for kw in spec.keywords):
+                if spec.is_oauth or spec.is_local or p.api_key:
                     return p, spec.name
+
+        # Fallback: configured local providers can route models without
+        # provider-specific keywords (for example plain "llama3.2" on Ollama).
+        for spec in PROVIDERS:
+            if not spec.is_local:
+                continue
+            p = getattr(self.providers, spec.name, None)
+            if p and p.api_base:
+                return p, spec.name
 
         # Fallback: gateways first, then others (follows registry order)
         # OAuth providers are NOT valid fallbacks — they require explicit model selection
@@ -321,7 +555,7 @@ class Config(BaseSettings):
         return p.api_key if p else None
 
     def get_api_base(self, model: str | None = None) -> str | None:
-        """Get API base URL for the given model. Applies default URLs for known gateways."""
+        """Get API base URL for the given model. Applies default URLs for gateway/local providers."""
         from nanobot.providers.registry import find_by_name
 
         p, name = self._match_provider(model)
@@ -332,7 +566,7 @@ class Config(BaseSettings):
         # to avoid polluting the global litellm.api_base.
         if name:
             spec = find_by_name(name)
-            if spec and spec.is_gateway and spec.default_api_base:
+            if spec and (spec.is_gateway or spec.is_local) and spec.default_api_base:
                 return spec.default_api_base
         return None
 
