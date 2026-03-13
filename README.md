@@ -1,4 +1,4 @@
-﻿# UltraBot
+﻿# nanobot-extension experiment
 
 UltraBot is a local-first AI assistant that works through CLI, Web UI, and chat platforms.
 
