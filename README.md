@@ -1,6 +1,6 @@
-﻿# nanobot-extension experiment
+﻿# UltraBot Extension
 
-UltraBot is a local-first AI assistant that works through CLI, Web UI, and chat platforms.
+UltraBot Extension is a local-first AI assistant project that works through CLI, Web UI, and chat platforms.
 
 ## What You Get
 
