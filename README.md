@@ -1,4 +1,4 @@
-﻿# UltraBot Extension
+﻿# nanobot Extension
 
 UltraBot Extension is a local-first AI assistant project that works through CLI, Web UI, and chat platforms.
 
